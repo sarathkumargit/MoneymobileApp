@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Apple system colors (light). Names kept from the earlier theme so every screen and Kotlin
+     reference keeps working; the meaning is now semantic:
+       bg_dark        = systemGroupedBackground
+       surface        = secondarySystemGroupedBackground (cards / grouped lists)
+       text_primary   = label            text_secondary = secondaryLabel
+       text_muted     = tertiaryLabel -->
+<resources>
+    <color name="bg_dark">#F2F2F7</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="fill">#E9E9EB</color>
+    <color name="separator">#D1D1D6</color>
+    <color name="primary">#007AFF</color>
+    <color name="success">#34C759</color>
+    <color name="danger">#FF3B30</color>
+    <color name="warning">#FF9500</color>
+    <color name="text_primary">#000000</color>
+    <color name="text_secondary">#6C6C70</color>
+    <color name="text_muted">#8E8E93</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="tint_success">#2634C759</color>
+    <color name="tint_danger">#26FF3B30</color>
+    <color name="tint_warning">#26FF9500</color>
+    <color name="tint_neutral">#1F787880</color>
+    <color name="track">#E5E5EA</color>
+</resources>

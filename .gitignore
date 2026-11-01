@@ -1,0 +1,21 @@
+*.apk
+*.aar
+*.aab
+*.class
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+.cxx/
+*.jks
+*.keystore
+google-services.json
+
+# local backups and scratch
+.backup-*/
+.perf-backup-*/
+.removed-*/
+_to_delete/
+.DS_Store

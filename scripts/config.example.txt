@@ -1,0 +1,7 @@
+# MoneyMobile setup config — download the real one from the website
+# (Settings -> Device setup). Keep this file next to the setup file and MoneyMobile.apk.
+SHOP_ID=paste-your-shop-id-here
+SHOP_SECRET=paste-your-shop-secret-here
+# Optional: where the phone finds the server. Leave out when the server runs on the same
+# computer as this setup file - it is detected automatically.
+# SERVER_URL=http://192.168.1.20:3000/api

@@ -1,0 +1,3 @@
+# MoneyMobile setup config
+SHOP_ID=41064eb3-8bcd-4407-a9cb-ede06196cded
+SHOP_SECRET=7008f9662f8845919c9c02743c66c744
