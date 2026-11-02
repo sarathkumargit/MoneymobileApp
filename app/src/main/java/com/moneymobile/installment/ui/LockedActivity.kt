@@ -146,6 +146,7 @@ class LockedActivity : AppCompatActivity() {
         }
 
         if (a == null) {
+            if (AppPreferences.getSimAlertState(this) != null) binding.tvSubReason.text = "A registered SIM card was removed or changed"
             binding.tvBalance.text = "—"
             binding.tvOverdue.text = "—"
             binding.tvNextDue.text = "—"
@@ -162,6 +163,7 @@ class LockedActivity : AppCompatActivity() {
         binding.tvOverdue.text = rs(a.overdueAmount ?: 0.0)
         binding.tvNextDue.text = formatDate(a.nextDueDate)
         binding.tvSubReason.text = when {
+            AppPreferences.getSimAlertState(this) != null -> "A registered SIM card was removed or changed"
             a.daysOverdue > 0 -> "Payment overdue by ${a.daysOverdue} day(s)"
             else -> "Installment payment required"
         }
@@ -343,11 +345,16 @@ class LockedActivity : AppCompatActivity() {
         when (val r = OfflineUnlock.verify(this, code)) {
             is OfflineUnlock.Result.Ok -> {
                 AppPreferences.setPendingOfflineUnlock(this, System.currentTimeMillis())
-                // The shop unlocked this deadline by hand: don't let the offline overdue lock re-lock for it.
-                com.moneymobile.installment.util.OfflineLockGuard.acknowledge(this)
+                // Open the phone for 30 minutes. If the payment is still due when that ends, it locks
+                // again by itself (no internet needed). Set BEFORE unlocking so the 15-second watcher
+                // can never see an unlocked phone without the window.
+                val relockAt = com.moneymobile.installment.util.OfflineLockGuard.acknowledge(this)
                 AppPreferences.setDeviceLocked(this, false)
                 try { DevicePolicyController(this).exitLockedMode() } catch (e: Exception) { }
-                Toast.makeText(this, "Unlocked", Toast.LENGTH_LONG).show()
+                val msg = if (relockAt != null)
+                    "Unlocked until ${SimpleDateFormat("h:mm a", Locale.US).format(java.util.Date(relockAt))}. Your phone locks again then if the payment isn't made."
+                else "Unlocked"
+                Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
                 ManagementService.syncNow(this) // tell the shop now if there is internet
                 exitKiosk()
             }

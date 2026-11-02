@@ -5,8 +5,8 @@ set -e
 cd "$(dirname "$0")"
 WEB="../Moneymobile WEB/setup-kit"
 echo "Building the app..."
-./gradlew assembleDebug
-APK=app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleRelease
+APK=app/build/outputs/apk/release/app-release.apk
 cp "$APK" scripts/MoneyMobile.apk
 mkdir -p "$WEB"
 cp "$APK" "$WEB/MoneyMobile.apk"

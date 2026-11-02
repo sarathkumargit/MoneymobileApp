@@ -1,10 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">MoneyMobile</string>
-    <string name="channel_name">Device Management</string>
-    <string name="channel_description">Monitors your installment agreement status</string>
-    <string name="notification_title">Device Management Active</string>
-    <string name="notification_text">Installment monitoring running</string>
-    <string name="locked_title">Device Restricted</string>
-    <string name="locked_message">Your device has been restricted due to an overdue payment. Please contact your shop to restore access.</string>
 </resources>

@@ -10,7 +10,6 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.UserManager
-import android.provider.Settings
 import android.provider.Telephony
 import android.telecom.TelecomManager
 import android.util.Log
@@ -46,6 +45,13 @@ class DevicePolicyController(private val context: Context) {
         blockSafeMode()
         lockClockSettings()
         blockTamperPaths()
+        // An unlocked phone must always have its USB port fully on (also repairs a phone left charge-only).
+        if (!com.moneymobile.installment.util.AppPreferences.isDeviceLocked(context) &&
+            !com.moneymobile.installment.util.AppPreferences.isUsbRepairDone(context)) {
+            // One attempt per install, flagged first, so a crash can never repeat it after a reboot.
+            com.moneymobile.installment.util.AppPreferences.setUsbRepairDone(context)
+            unlockUsbPort()
+        }
         grantLocationPermissions()
         grantNotificationPermission()
         // Status bar is only disabled while LOCKED (see enterLockedMode) — disabling it
@@ -77,6 +83,25 @@ class DevicePolicyController(private val context: Context) {
             try { dpm.setUserControlDisabledPackages(adminComponent, listOf(context.packageName)) }
             catch (e: Exception) { Log.w("DPC", "user-control lock: ${e.message}") }
         }
+    }
+
+    /**
+     * Enterprise factory-reset protection (Android 11+): after a factory reset or reflash, the phone
+     * asks for one of these Google accounts, so only the shop can set it up again. An empty list
+     * clears the policy. Returns true when it was applied (or is not applicable).
+     */
+    fun applyFactoryResetProtection(accountIds: List<String>): Boolean {
+        if (!isDeviceOwner || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return true
+        return try {
+            val policy = if (accountIds.isEmpty()) null else
+                android.app.admin.FactoryResetProtectionPolicy.Builder()
+                    .setFactoryResetProtectionAccounts(accountIds)
+                    .setFactoryResetProtectionEnabled(true)
+                    .build()
+            dpm.setFactoryResetProtectionPolicy(adminComponent, policy)
+            Log.i("DPC", "Factory-reset protection: ${accountIds.size} account(s)")
+            true
+        } catch (e: Exception) { Log.w("DPC", "FRP: ${e.message}"); false }
     }
 
     /** Prevent user from uninstalling this app */
@@ -173,17 +198,6 @@ class DevicePolicyController(private val context: Context) {
             dpm.setStatusBarDisabled(adminComponent, true)
         } catch (e: Exception) {
             Log.w("DPC", "setStatusBarDisabled not supported: ${e.message}")
-        }
-    }
-
-    /** Disable ADB debugging after enrollment for security */
-    fun disableADB() {
-        if (!isDeviceOwner) return
-        try {
-            dpm.setGlobalSetting(adminComponent, Settings.Global.ADB_ENABLED, "0")
-            Log.i("DPC", "ADB disabled")
-        } catch (e: Exception) {
-            Log.e("DPC", "disableADB failed: ${e.message}")
         }
     }
 
@@ -302,19 +316,20 @@ class DevicePolicyController(private val context: Context) {
     }
 
     /**
-     * While the phone is locked, the USB port is charge-only: no file transfer, no USB debugging
-     * (ADB) and, on Android 12+ phones that support it, no USB data at all. The customer can't use a
-     * computer to reach the phone while it is restricted. Everything is lifted again on unlock, so
-     * the shop can still update the app over USB afterwards.
+     * ONLY while the phone is locked (overdue payment, SIM removed, or the shop restricted it):
+     * no USB file transfer and no USB debugging, so a computer cannot reach the phone. Every one of
+     * these is lifted again the moment the phone is unlocked or released. An unlocked phone has
+     * normal, full USB.
      */
     private fun lockUsbPort() {
         if (!isDeviceOwner) return
         listOf(UserManager.DISALLOW_USB_FILE_TRANSFER, UserManager.DISALLOW_DEBUGGING_FEATURES).forEach { r ->
             try { dpm.addUserRestriction(adminComponent, r) } catch (e: Exception) { Log.w("DPC", "add $r: ${e.message}") }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try { dpm.setUsbDataSignalingEnabled(false) } catch (e: Exception) { Log.w("DPC", "usb data off: ${e.message}") }
-        }
+        // NOTE: deliberately NOT calling setUsbDataSignalingEnabled(false). That switches the USB port
+        // off in the phone's hardware layer, and on some phones the setting can outlive the app —
+        // leaving a released phone charge-only for good. The two restrictions above already stop file
+        // transfer and USB debugging, and they are removed cleanly with the app.
     }
 
     private fun unlockUsbPort() {
@@ -322,8 +337,13 @@ class DevicePolicyController(private val context: Context) {
         listOf(UserManager.DISALLOW_USB_FILE_TRANSFER, UserManager.DISALLOW_DEBUGGING_FEATURES).forEach { r ->
             try { dpm.clearUserRestriction(adminComponent, r) } catch (e: Exception) { Log.w("DPC", "clear $r: ${e.message}") }
         }
+        // Only touch the USB hardware layer when it is actually switched off (an older build did that).
+        // Calling it on every start is needless, and on a phone with a faulty USB layer it can crash
+        // Android's core process and reboot the phone in a loop.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try { dpm.setUsbDataSignalingEnabled(true) } catch (e: Exception) { Log.w("DPC", "usb data on: ${e.message}") }
+            try {
+                if (!dpm.isUsbDataSignalingEnabled) dpm.setUsbDataSignalingEnabled(true)
+            } catch (e: Exception) { Log.w("DPC", "usb data on: ${e.message}") }
         }
     }
 
@@ -460,6 +480,14 @@ class DevicePolicyController(private val context: Context) {
             Log.w("DPC", "releaseFully: not Device Owner, nothing to tear down")
             return
         }
+        // 0. FIRST remove the shop's reset protection and CHECK it is really gone. If Android still holds it,
+        // stop before changing anything else: the phone stays exactly as it was (still managed), the shop sees
+        // "release incomplete" and can press Release again. A paid-off phone must never keep asking for the
+        // shop's Google account after a reset.
+        if (!clearResetProtectionForRelease()) {
+            Log.e("DPC", "releaseFully: reset protection could not be removed — nothing changed, Release can be retried")
+            return
+        }
         // 1. Leave the kiosk and restore the normal launcher / keyguard / status bar.
         exitLockedMode()
         // 2. Drop every user restriction we ever set (SIM, factory reset, accounts, safe boot...).
@@ -488,6 +516,9 @@ class DevicePolicyController(private val context: Context) {
         try { dpm.setUninstallBlocked(adminComponent, context.packageName, false) } catch (e: Exception) { Log.w("DPC", "unblock uninstall: ${e.message}") }
         // 4. Clear the kiosk allowlist.
         try { dpm.setLockTaskPackages(adminComponent, arrayOf()) } catch (e: Exception) { Log.w("DPC", "clear lock task: ${e.message}") }
+        // 4b. USB data is a policy stored by Android, not by this app, so it would survive our removal.
+        //     Switch it back on explicitly as the very last privileged step.
+        unlockUsbPort()
         // 5. Finally give up Device Owner. MUST be last — after this, no privileged call works.
         try {
             dpm.clearDeviceOwnerApp(context.packageName)
@@ -505,5 +536,47 @@ class DevicePolicyController(private val context: Context) {
         } catch (e: Exception) {
             Log.w("DPC", "enableStatusBar failed: ${e.message}")
         }
+    }
+
+    /**
+     * Online app update: briefly lift "no installs from unknown sources" while MoneyMobile installs its
+     * own update, then put it back. It is also put back on every service start (blockTamperPaths), so
+     * even if the phone dies mid-install the restriction returns on the next start.
+     */
+    fun allowSelfUpdateInstall(allow: Boolean) {
+        if (!isDeviceOwner) return
+        try {
+            if (allow) dpm.clearUserRestriction(adminComponent, UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES)
+            else dpm.addUserRestriction(adminComponent, UserManager.DISALLOW_INSTALL_UNKNOWN_SOURCES)
+        } catch (e: Exception) { Log.w("DPC", "self-update restriction ($allow): ${e.message}") }
+    }
+
+    /**
+     * Reset protection as Android really holds it, for the shop's dashboard:
+     * "on" + the account IDs, "off", or "unsupported" (Android 10 or older, or the phone doesn't offer it).
+     */
+    fun frpStatus(): Pair<String, String?> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return "unsupported" to null
+        if (!isDeviceOwner) return "off" to null
+        return try {
+            val p = dpm.getFactoryResetProtectionPolicy(adminComponent)
+            val ids = p?.factoryResetProtectionAccounts?.filter { it.isNotBlank() }?.sorted().orEmpty()
+            if (p != null && p.isFactoryResetProtectionEnabled && ids.isNotEmpty()) "on" to ids.joinToString(",") else "off" to null
+        } catch (e: UnsupportedOperationException) {
+            // Android throws this when the phone has no factory-reset-protection support.
+            "unsupported" to null
+        } catch (e: Exception) {
+            Log.w("DPC", "FRP status: ${e.message}")
+            "failed" to null
+        }
+    }
+
+    /** Release step: turn reset protection off and confirm it. True when it is off (or the phone never had it). */
+    private fun clearResetProtectionForRelease(): Boolean {
+        repeat(2) {
+            try { applyFactoryResetProtection(emptyList()) } catch (e: Exception) { }
+            if (frpStatus().first != "on") return true
+        }
+        return false
     }
 }

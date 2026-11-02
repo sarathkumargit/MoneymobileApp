@@ -87,6 +87,25 @@ class EnrollmentActivity : AppCompatActivity() {
             return
         }
         if (intent?.getStringExtra("action") != "REGISTER_DEVICE") return
+        // An already-registered phone only accepts a new registration signed with the SAME shop id
+        // and secret it was set up with (the setup kit re-register option). Anything else — another
+        // app, or someone with a cable — could wipe the phone's deadline and repoint it at a fake
+        // server, so it is ignored.
+        if (AppPreferences.isEnrolled(this) && !AppPreferences.isReleased(this)) {
+            val savedShop = AppPreferences.getSetupShopId(this)
+            val savedSecret = AppPreferences.getSetupSecret(this)
+            val newShop = intent.getStringExtra("shop_id")?.trim()
+            val newSecret = intent.getStringExtra("enroll_secret")?.trim()
+            val url = intent.getStringExtra("server_url")?.trim()
+            // Phones set up by an older build have nothing saved to compare with: let them re-register once
+            // (that saves the details, so they are protected from then on).
+            val sameSetup = savedShop.isNullOrBlank() || (savedShop == newShop && savedSecret == newSecret)
+            val urlOk = url.isNullOrBlank() || isSameOrLocalHost(url)
+            if (!sameSetup || !urlOk) {
+                Log.w(LOG_TAG, "REGISTER_DEVICE ignored on a registered phone (setup details do not match)")
+                finish(); return
+            }
+        }
         intent.getStringExtra("token")?.let { binding.etToken.setText(it) }
         intent.getStringExtra("agreement_id")?.let { binding.etAgreementId.setText(it) }
         val shopId = intent.getStringExtra("shop_id")?.trim()

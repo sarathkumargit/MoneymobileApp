@@ -39,18 +39,12 @@ class EnrollmentRepository(private val context: Context) {
                     // Save credentials securely
                     body.deviceId?.let { AppPreferences.setDeviceId(context, it) }
                     body.deviceToken?.let { AppPreferences.setDeviceToken(context, it) }
-                    AppPreferences.setShopId(context, shopId)
-                    agreementId?.let { AppPreferences.setAgreementId(context, it) }
+                    body.commandKey?.let { AppPreferences.setCommandKey(context, it) }
                     AppPreferences.setEnrolled(context, true)
 
                     // Save the agreement snapshot so the dashboard shows real data
                     body.agreement?.let {
                         AppPreferences.setAgreementStatusJson(context, com.google.gson.Gson().toJson(it))
-                    }
-
-                    // Record initial SIM ICCID
-                    DeviceInfoCollector.getSimIccid(context)?.let {
-                        AppPreferences.setLastKnownIccid(context, it)
                     }
 
                     EnrollmentResult.Success(body)
@@ -76,13 +70,10 @@ class EnrollmentRepository(private val context: Context) {
                 if (body != null && body.success) {
                     body.deviceId?.let { AppPreferences.setDeviceId(context, it) }
                     body.deviceToken?.let { AppPreferences.setDeviceToken(context, it) }
-                    AppPreferences.setShopId(context, shopId)
+                    body.commandKey?.let { AppPreferences.setCommandKey(context, it) }
                     AppPreferences.setEnrolled(context, true)
                     body.agreement?.let {
                         AppPreferences.setAgreementStatusJson(context, com.google.gson.Gson().toJson(it))
-                    }
-                    DeviceInfoCollector.getSimIccid(context)?.let {
-                        AppPreferences.setLastKnownIccid(context, it)
                     }
                     EnrollmentResult.Success(body)
                 } else {

@@ -36,16 +36,15 @@ interface ApiService {
         @Body request: UnlockRequestBody
     ): Response<ApiResponse<Unit>>
 
+    /** Online app update: how far the download / install got */
+    @POST("devices/app-update")
+    suspend fun reportAppUpdate(
+        @Body request: AppUpdateStatusRequest
+    ): Response<ApiResponse<Unit>>
+
     /** Acknowledge a command received from backend */
     @POST("devices/command-ack")
     suspend fun acknowledgeCommand(
         @Body request: CommandAckRequest
     ): Response<ApiResponse<Unit>>
-
-    /** Poll for any pending commands */
-    @GET("devices/{deviceId}/commands")
-    suspend fun getPendingCommands(
-        @Path("deviceId") deviceId: String,
-        @Header("Authorization") token: String
-    ): Response<ApiResponse<DeviceCommand>>
 }

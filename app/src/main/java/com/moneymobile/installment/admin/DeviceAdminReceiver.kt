@@ -5,7 +5,6 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.moneymobile.installment.service.ManagementService
-import com.moneymobile.installment.util.AppPreferences
 
 class DeviceAdminReceiver : DeviceAdminReceiver() {
 
@@ -16,7 +15,6 @@ class DeviceAdminReceiver : DeviceAdminReceiver() {
     override fun onEnabled(context: Context, intent: Intent) {
         super.onEnabled(context, intent)
         Log.i(TAG, "Device Admin enabled")
-        AppPreferences.setAdminEnabled(context, true)
         // `adb shell dpm set-device-owner` triggers onEnabled (onProfileProvisioningComplete
         // only fires for QR/NFC provisioning), so apply the baseline protections here too.
         val controller = DevicePolicyController(context)
@@ -26,7 +24,6 @@ class DeviceAdminReceiver : DeviceAdminReceiver() {
     override fun onDisabled(context: Context, intent: Intent) {
         super.onDisabled(context, intent)
         Log.w(TAG, "Device Admin disabled — reporting security event")
-        AppPreferences.setAdminEnabled(context, false)
         // Report tamper to backend even if we lose control
         ManagementService.reportSecurityEvent(context, "ADMIN_DISABLED")
     }

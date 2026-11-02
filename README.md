@@ -145,3 +145,15 @@ Colors live in `res/values/colors.xml` (light) and `res/values-night/colors.xml`
 (`bg_dark` = grouped background, `surface` = card, `text_primary/secondary/muted` = label levels).
 Also: the phone registers itself again if the shop deleted its record (heartbeat 401 -> auto re-register).
 Original screens are backed up in `.backup-2026-10-31-apple-ui/`.
+
+## v1.10.0 — Online app updates
+The app can now update itself over the internet when shop staff press **Update** on the website (see the web
+project's ARCHITECTURE.md, "Online app updates"). Code: `update/AppUpdater.kt`, `update/AppUpdateWorker.kt`,
+`update/InstallResultReceiver.kt`, `monitor/AppUpdatedReceiver.kt`. Phones on 1.9.x need one USB update to get this.
+**Every release must raise `versionCode` and be signed with the same key** (release builds use the debug keystore at
+`~/.android/debug.keystore` on the build Mac — losing it means no phone can ever be updated again without a reset).
+Originals of changed files: `.backup-2026-11-02-app-updates/`.
+
+## v1.10.1 — Per-shop reset protection status
+Applies the shop's reset-protection Google account(s) only when the server signed the list (`CommandSig.frpOk`) and reports
+what Android really holds (`DevicePolicyController.frpStatus`) on every check-in. Originals: `.backup-2026-11-03-reset-protection/`.

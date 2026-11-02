@@ -133,6 +133,8 @@ class MainActivity : AppCompatActivity() {
         binding.progressPaid.setProgressCompat(pct, true)
 
         val locked = AppPreferences.isDeviceLocked(this)
+        // Asking the shop to unlock only makes sense while the phone is actually locked.
+        binding.btnUnlock.visibility = if (locked) View.VISIBLE else View.GONE
         binding.tvStatusChip.text = when {
             locked -> "Locked"
             else -> a.status.replaceFirstChar { it.uppercase() }
@@ -193,6 +195,7 @@ class MainActivity : AppCompatActivity() {
         binding.tvPaidOfTotal.text = "—"
         binding.tvNextDue.text = "—"
         binding.progressPaid.setProgressCompat(0, false)
+        binding.btnUnlock.visibility = if (AppPreferences.isDeviceLocked(this)) View.VISIBLE else View.GONE
         binding.tvStatusChip.text = "Pending"
         styleChip(R.color.text_secondary, R.color.tint_neutral)
         binding.tvAgreementLine.text = message

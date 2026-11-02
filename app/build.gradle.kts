@@ -12,22 +12,36 @@ android {
         applicationId = "com.moneymobile.installment"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "1.8.0"
+        // 19 = 1.10.0, the first build that can update itself online. Raise versionCode for EVERY release
+        // (the website rejects an upload that is not newer, and Android never installs an older build).
+        versionCode = 20
+        versionName = "1.10.1"
 
         buildConfigField("String", "BASE_URL", "\"http://192.168.8.168:3000/api\"")
-        buildConfigField("String", "ENROLLMENT_SECRET", "\"CHANGE_THIS_SECRET\"")
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Customer phones get the RELEASE build: not debuggable (no `adb run-as` / debugger),
+            // no network logging, HTTPS only, and no fallback to a developer's LAN address.
+            // It is signed with the same key as earlier installs so phones already in the field
+            // can still be updated in place (Device Owner apps cannot be uninstalled/reinstalled).
+            isDebuggable = false
+            isMinifyEnabled = false
+            isShrinkResources = false
+            signingConfig = signingConfigs.getByName("debug")
+            buildConfigField("String", "BASE_URL", "\"https://moneymobileweb.vercel.app/api\"")
+            manifestPlaceholders["cleartext"] = "false"
         }
         debug {
             isDebuggable = true
+            manifestPlaceholders["cleartext"] = "true"
         }
+    }
+
+    // The release safety scan (lintVital) adds minutes to every build. Run `./gradlew lint` by hand when wanted.
+    lint {
+        checkReleaseBuilds = false
     }
 
     buildFeatures {

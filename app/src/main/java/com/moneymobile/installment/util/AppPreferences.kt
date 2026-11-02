@@ -58,18 +58,6 @@ object AppPreferences {
     fun setDeviceToken(context: Context, token: String) =
         getPrefs(context).edit().putString("device_token", token).apply()
 
-    fun getShopId(context: Context): String? =
-        getPrefs(context).getString("shop_id", null)
-
-    fun setShopId(context: Context, shopId: String) =
-        getPrefs(context).edit().putString("shop_id", shopId).apply()
-
-    fun getAgreementId(context: Context): String? =
-        getPrefs(context).getString("agreement_id", null)
-
-    fun setAgreementId(context: Context, agreementId: String) =
-        getPrefs(context).edit().putString("agreement_id", agreementId).apply()
-
     // ─── Shop setup (from the setup file on the computer) ────
     // Saved the moment the setup file hands them over, so registration can retry on its own
     // (no Wi-Fi yet, server offline, app reopened) without anyone typing the shop ID.
@@ -101,10 +89,13 @@ object AppPreferences {
             // New owner/registration: forget the previous approved SIM and any SIM alert.
             // The SIM present at registration becomes the approved one.
             .remove("last_sim_iccid")
+            .remove("command_key")
             .remove("sim_alert_state")
             .remove("pending_sim_event")
             .remove("offline_lock_at")
             .remove("offline_lock_ack_at")
+            .remove("offline_lock_ack_upto")
+            .remove("offline_later_lock_at")
             .remove("lock_warn_state")
             .remove("clock_ms").remove("clock_elapsed").remove("clock_boot").remove("clock_last_est")
             .commit()
@@ -117,17 +108,42 @@ object AppPreferences {
 
     // ─── Device Status ───────────────────────────────────────
 
-    fun isAdminEnabled(context: Context): Boolean =
-        getPrefs(context).getBoolean("admin_enabled", false)
+    // The lock flag is also kept in a plain "shadow" file. If the encrypted store ever fails to open
+    // (it can after some OS updates), the phone must stay LOCKED instead of looking unlocked.
+    private const val SHADOW_FILE = "mm_lock_shadow"
 
-    fun setAdminEnabled(context: Context, enabled: Boolean) =
-        getPrefs(context).edit().putBoolean("admin_enabled", enabled).apply()
+    fun isDeviceLocked(context: Context): Boolean {
+        val shadow = try { context.applicationContext.getSharedPreferences(SHADOW_FILE, Context.MODE_PRIVATE).getBoolean("locked", false) } catch (e: Exception) { false }
+        return shadow || getPrefs(context).getBoolean("device_locked", false)
+    }
 
-    fun isDeviceLocked(context: Context): Boolean =
-        getPrefs(context).getBoolean("device_locked", false)
-
-    fun setDeviceLocked(context: Context, locked: Boolean) =
+    fun setDeviceLocked(context: Context, locked: Boolean) {
+        try { context.applicationContext.getSharedPreferences(SHADOW_FILE, Context.MODE_PRIVATE).edit().putBoolean("locked", locked).commit() } catch (e: Exception) { }
         getPrefs(context).edit().putBoolean("device_locked", locked).apply()
+    }
+
+    fun getLastCmdId(context: Context): String? = getPrefs(context).getString("last_cmd_id", null)
+
+    fun setLastCmdId(context: Context, id: String) = getPrefs(context).edit().putString("last_cmd_id", id).apply()
+
+    // One-time USB repair flag (stored in the plain shadow file so it survives even if encrypted storage fails).
+    fun isUsbRepairDone(context: Context): Boolean =
+        try { context.applicationContext.getSharedPreferences(SHADOW_FILE, Context.MODE_PRIVATE).getBoolean("usb_repair", false) } catch (e: Exception) { true }
+
+    fun setUsbRepairDone(context: Context) {
+        try { context.applicationContext.getSharedPreferences(SHADOW_FILE, Context.MODE_PRIVATE).edit().putBoolean("usb_repair", true).commit() } catch (e: Exception) { }
+    }
+
+    /** Per-phone key the server uses to sign commands and lock state (see CommandSig). */
+    fun getCommandKey(context: Context): String? = getPrefs(context).getString("command_key", null)
+
+    fun setCommandKey(context: Context, key: String) = getPrefs(context).edit().putString("command_key", key).apply()
+
+    /** Google account IDs last applied as factory-reset protection (so it is only re-applied on change). */
+    fun getFrpApplied(context: Context): String? = getPrefs(context).getString("frp_applied", null)
+
+    fun setFrpApplied(context: Context, v: String?) =
+        getPrefs(context).edit().apply { if (v == null) remove("frp_applied") else putString("frp_applied", v) }.apply()
 
     // Set once the phone is fully paid and released — management stops permanently.
     fun isReleased(context: Context): Boolean =
@@ -209,6 +225,28 @@ object AppPreferences {
 
     fun setOfflineLockAckAt(context: Context, at: Long) =
         getPrefs(context).edit().putLong("offline_lock_ack_at", at).commit()
+
+    /** The next months' payment deadlines after the first (UTC epoch ms, ascending) — so the phone keeps locking every month with no internet. */
+    fun getLaterLockAt(context: Context): List<Long> =
+        (getPrefs(context).getString("offline_later_lock_at", "") ?: "").split(",").mapNotNull { it.trim().toLongOrNull() }
+
+    fun setLaterLockAt(context: Context, list: List<Long>) =
+        getPrefs(context).edit().putString("offline_later_lock_at", list.joinToString(",")).commit()
+
+    /** Unlock-code window: the phone stays unlocked until this trusted time (UTC epoch ms), then the
+     *  overdue lock comes back if the payment is still due. 0 = no window. */
+    fun getCodeGraceUntil(context: Context): Long =
+        getPrefs(context).getLong("code_grace_until", 0L)
+
+    fun setCodeGraceUntil(context: Context, at: Long) =
+        getPrefs(context).edit().putLong("code_grace_until", at).commit()
+
+    /** Every deadline at or before this moment was already handled (unlocked with a shop code). Only ever moves forward. */
+    fun getOfflineLockAckUpTo(context: Context): Long =
+        getPrefs(context).getLong("offline_lock_ack_upto", 0L)
+
+    fun setOfflineLockAckUpTo(context: Context, at: Long) =
+        getPrefs(context).edit().putLong("offline_lock_ack_upto", at).commit()
 
     /** Which "phone will lock soon" reminders were already shown, as "<lockAt>|<bitmask>". */
     fun getLockWarnState(context: Context): String? =

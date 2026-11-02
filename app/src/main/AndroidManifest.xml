@@ -32,11 +32,11 @@
     <!-- "Your phone will lock on ..." payment reminders (granted silently by Device Owner) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Online app update: MoneyMobile installs its own newer version (Device Owner, no prompt) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Wake lock -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-
-    <!-- Device Admin -->
-    <uses-permission android:name="android.permission.MANAGE_DEVICE_POLICY_LOCK_TASK" />
 
     <!-- Package visibility (Android 11+): lets DevicePolicyController find the dialer,
          in-call screen and SMS app so they can be allow-listed in the lock-task kiosk. -->
@@ -64,7 +64,7 @@
     <application
         android:name=".MoneyMobileApp"
         android:allowBackup="false"
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="${cleartext}"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -97,7 +97,7 @@
 
         <activity
             android:name=".ui.MainActivity"
-            android:exported="true"
+            android:exported="false"
             android:launchMode="singleTask" />
 
         <activity
@@ -176,6 +176,21 @@
         <receiver
             android:name=".monitor.OfflineLockReceiver"
             android:exported="false" />
+
+        <!-- ══════════════ ONLINE APP UPDATE ══════════════ -->
+        <!-- Result of the silent self-update install (update/AppUpdater). -->
+        <receiver
+            android:name=".update.InstallResultReceiver"
+            android:exported="false" />
+
+        <!-- Sent by Android to the NEW version right after an update: restart management at once. -->
+        <receiver
+            android:name=".monitor.AppUpdatedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- ══════════════ SIM CHANGE RECEIVER ══════════════ -->
 

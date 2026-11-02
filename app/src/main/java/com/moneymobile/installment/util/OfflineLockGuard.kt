@@ -20,6 +20,10 @@ import com.moneymobile.installment.monitor.OfflineLockReceiver
  *     ManagementService applies the same kiosk lock the Lock button uses.
  *  3. The next check-in is still the source of truth: a payment, a changed due date or a staff
  *     unlock sends a new deadline (or none) and the phone follows it.
+ *  4. A shop unlock code opens the phone for [CODE_GRACE_MS] (30 min). The deadline is NOT cleared:
+ *     when the window ends and the payment is still due, the phone locks again by itself — with no
+ *     internet. The server keeps the same window (lib/billing/overdue-lock.ts), so online and
+ *     offline agree.
  *
  * Trusted clock — the customer can't beat the lock by moving the date back
  *  Time is measured as "server time at the last check-in + SystemClock.elapsedRealtime() since",
@@ -32,6 +36,8 @@ object OfflineLockGuard {
 
     /** Wait this long past the deadline so the phone never beats the server by a few seconds (no lock/unlock flapping). */
     private const val MARGIN_MS = 60_000L
+    /** How long a shop unlock code keeps the phone open. Keep in sync with OFFLINE_UNLOCK_GRACE_MINUTES on the server. */
+    const val CODE_GRACE_MS = 30 * 60_000L
     private const val PERSIST_EVERY_MS = 60_000L
     @Volatile private var lastPersistElapsed = 0L
 
@@ -60,12 +66,13 @@ object OfflineLockGuard {
     }
 
     /** Called with every successful check-in that carries agreement data. */
-    fun onSynced(context: Context, serverNowMs: Long?, lockAtMs: Long?) {
+    fun onSynced(context: Context, serverNowMs: Long?, lockAtMs: Long?, laterMs: List<Long> = emptyList()) {
         val app = context.applicationContext
         if (serverNowMs != null && serverNowMs > 0L) {
             AppPreferences.setClockAnchor(app, AppPreferences.ClockAnchor(serverNowMs, SystemClock.elapsedRealtime(), bootCount(app)))
         }
         val lockAt = lockAtMs ?: 0L
+        AppPreferences.setLaterLockAt(app, laterMs.filter { it > 0L }.sorted().take(24))
         if (AppPreferences.getOfflineLockAt(app) != lockAt) {
             AppPreferences.setOfflineLockAt(app, lockAt)
             LockWarnings.cancel(app) // deadline changed (paid / extended): drop the old reminder
@@ -73,25 +80,51 @@ object OfflineLockGuard {
         schedule(app)
     }
 
-    /** True when the payment deadline has passed and it has not already been enforced / unlocked by a shop code. */
+    /**
+     * True when a payment deadline has passed and it has not already been enforced / unlocked by a shop code.
+     * Every unpaid month has its own deadline, so this fires again each month with no internet.
+     */
     fun isDue(context: Context): Boolean {
-        val lockAt = AppPreferences.getOfflineLockAt(context)
-        if (lockAt <= 0L || lockAt == AppPreferences.getOfflineLockAckAt(context)) return false
+        val lockAt = effectiveLockAt(context.applicationContext) ?: return false
         return trustedNow(context) >= lockAt + MARGIN_MS
     }
 
-    /** The pending payment deadline (UTC epoch ms), or null when there is nothing to enforce / it was already handled. */
-    fun upcomingLockAt(context: Context): Long? {
-        val lockAt = AppPreferences.getOfflineLockAt(context)
-        return if (lockAt <= 0L || lockAt == AppPreferences.getOfflineLockAckAt(context)) null else lockAt
+    /** When the phone will lock next (UTC epoch ms) — a payment deadline, or the end of an unlock-code
+     *  window if that is later — or null when there is nothing left to enforce. */
+    fun upcomingLockAt(context: Context): Long? = effectiveLockAt(context.applicationContext)
+
+    /** The pending deadline, pushed back to the end of an open unlock-code window. A window on its own
+     *  never locks the phone: with no unpaid deadline (e.g. paid since), there is nothing to enforce. */
+    private fun effectiveLockAt(app: Context): Long? {
+        val deadline = pendingLockAt(app) ?: return null
+        return maxOf(deadline, AppPreferences.getCodeGraceUntil(app))
     }
 
-    /** The shop unlocked this deadline with an offline code: don't lock for it again. */
-    fun acknowledge(context: Context) {
+    /** Earliest deadline (this month's or any later month's) that a shop code has not already handled. */
+    private fun pendingLockAt(app: Context): Long? {
+        val upTo = AppPreferences.getOfflineLockAckUpTo(app)
+        val ackAt = AppPreferences.getOfflineLockAckAt(app)
+        return (listOf(AppPreferences.getOfflineLockAt(app)) + AppPreferences.getLaterLockAt(app))
+            .filter { it > 0L && it > upTo && it != ackAt }
+            .minOrNull()
+    }
+
+    /**
+     * The customer typed a shop unlock code: open the phone for [CODE_GRACE_MS]. The deadline stays,
+     * so when the window ends and the payment is still due the phone locks again — online or not.
+     * (Before v1.9.3 this cleared the deadline, so an offline phone stayed open until it next synced.)
+     *
+     * Returns when the phone will lock again because of this window, or null if nothing is due
+     * (e.g. the code was used for a SIM / manual lock, not an overdue payment).
+     */
+    fun acknowledge(context: Context): Long? {
         val app = context.applicationContext
-        AppPreferences.setOfflineLockAckAt(app, AppPreferences.getOfflineLockAt(app))
-        cancel(app)
+        val until = trustedNow(app) + CODE_GRACE_MS
+        AppPreferences.setCodeGraceUntil(app, until)
         LockWarnings.cancel(app)
+        schedule(app) // re-arm the alarm for the end of the window (or the next deadline)
+        val next = effectiveLockAt(app)
+        return if (next != null && next <= until) next else null
     }
 
     /** (Re)arms the one-shot deadline alarm. Safe to call any time; lost on reboot, so BOOT calls it. */
@@ -99,8 +132,8 @@ object OfflineLockGuard {
         val app = context.applicationContext
         val am = app.getSystemService(AlarmManager::class.java) ?: return
         val pi = alarmIntent(app)
-        val lockAt = AppPreferences.getOfflineLockAt(app)
-        if (lockAt <= 0L || lockAt == AppPreferences.getOfflineLockAckAt(app)) { am.cancel(pi); LockWarnings.schedule(app); return }
+        val lockAt = effectiveLockAt(app)
+        if (lockAt == null) { am.cancel(pi); LockWarnings.schedule(app); return }
         LockWarnings.schedule(app)
 
         val wait = (lockAt + MARGIN_MS + 1_000L - trustedNow(app)).coerceAtLeast(1_000L)

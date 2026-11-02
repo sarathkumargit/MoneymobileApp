@@ -41,6 +41,7 @@ data class EnrollmentResponse(
     @SerializedName("success") val success: Boolean,
     @SerializedName("device_id") val deviceId: String?,
     @SerializedName("device_token") val deviceToken: String?,
+    @SerializedName("command_key") val commandKey: String? = null,
     @SerializedName("agreement") val agreement: AgreementStatus?,
     @SerializedName("message") val message: String?
 )
@@ -66,7 +67,12 @@ data class AgreementStatus(
     // Offline lock: the shop server's clock, and the moment (UTC epoch ms) the first unpaid
     // installment goes overdue. The phone keeps both so it can lock itself with no internet.
     @SerializedName("server_time") val serverTime: Long? = null,
-    @SerializedName("overdue_lock_at") val overdueLockAt: Long? = null
+    @SerializedName("overdue_lock_at") val overdueLockAt: Long? = null,
+    // The deadlines of the following unpaid months, and their own signature (see CommandSig.laterLockAt).
+    @SerializedName("later_lock_at") val laterLockAt: List<Long>? = null,
+    @SerializedName("later_sig") val laterSig: String? = null,
+    // Server signature over the lock fields (see CommandSig).
+    @SerializedName("sig") val sig: String? = null
 )
 
 // ─── Heartbeat ───────────────────────────────────────────────
@@ -89,13 +95,47 @@ data class HeartbeatRequest(
     // own backup check — that backup would re-lock a phone staff unlocked while it was offline.
     @SerializedName("sim_watch") val simWatch: Boolean = true,
     @SerializedName("fcm_token") val fcmToken: String? = null,   // Firebase push token (for reaching the phone)
-    @SerializedName("timestamp") val timestamp: Long
+    @SerializedName("has_command_key") val hasCommandKey: Boolean = false, // the server only sends the signing key to phones without one
+    @SerializedName("timestamp") val timestamp: Long,
+    // App build number (versionCode). Lets the shop see which phones can take an online update.
+    @SerializedName("app_version_code") val appVersionCode: Int? = null,
+    // Reset protection as the phone really holds it: on | off | unsupported | failed, and the account IDs.
+    @SerializedName("frp_state") val frpState: String? = null,
+    @SerializedName("frp_accounts") val frpAccounts: String? = null
 )
 
 data class HeartbeatResponse(
     @SerializedName("success") val success: Boolean,
     @SerializedName("command") val command: DeviceCommand?,
-    @SerializedName("agreement") val agreement: AgreementStatus?
+    @SerializedName("agreement") val agreement: AgreementStatus?,
+    @SerializedName("command_key") val commandKey: String? = null,
+    @SerializedName("frp_account_ids") val frpAccountIds: List<String>? = null,
+    @SerializedName("frp_sig") val frpSig: String? = null,      // server signature over the account list (CommandSig.frpOk)
+    // Present only when shop staff pressed "Update" for this phone (see update/AppUpdater).
+    @SerializedName("app_update") val appUpdate: AppUpdateInfo? = null
+)
+
+// ─── Online app update ───────────────────────────────────────
+
+/** Which app file to install. Signed by the server (CommandSig.updateOk); the file itself is also checked. */
+data class AppUpdateInfo(
+    @SerializedName("request_id") val requestId: String? = null,
+    @SerializedName("version_code") val versionCode: Int? = null,
+    @SerializedName("version_name") val versionName: String? = null,
+    @SerializedName("url") val url: String? = null,
+    @SerializedName("sha256") val sha256: String? = null,
+    @SerializedName("size") val size: Long? = null,
+    @SerializedName("sig") val sig: String? = null
+)
+
+/** Progress report for an app update: downloading | waiting | installing | installed | failed. */
+data class AppUpdateStatusRequest(
+    @SerializedName("device_id") val deviceId: String,
+    @SerializedName("device_token") val deviceToken: String,
+    @SerializedName("request_id") val requestId: String,
+    @SerializedName("status") val status: String,
+    @SerializedName("detail") val detail: String?,
+    @SerializedName("version_code") val versionCode: Int
 )
 
 // ─── Commands ────────────────────────────────────────────────
@@ -104,7 +144,8 @@ data class DeviceCommand(
     @SerializedName("id") val id: String,
     @SerializedName("type") val type: CommandType,
     @SerializedName("reason") val reason: String?,
-    @SerializedName("issued_at") val issuedAt: String
+    @SerializedName("issued_at") val issuedAt: String,
+    @SerializedName("sig") val sig: String? = null
 )
 
 enum class CommandType {

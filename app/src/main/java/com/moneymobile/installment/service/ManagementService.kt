@@ -20,6 +20,7 @@ import com.moneymobile.installment.api.ApiClient
 import com.moneymobile.installment.model.*
 import com.moneymobile.installment.ui.LockedActivity
 import com.moneymobile.installment.util.AppPreferences
+import com.moneymobile.installment.util.CommandSig
 import com.moneymobile.installment.util.DeviceInfoCollector
 import com.moneymobile.installment.util.LocationCollector
 import com.moneymobile.installment.util.LockWarnings
@@ -39,6 +40,7 @@ class ManagementService : Service() {
     @Volatile private var locationRefreshing = false
     @Volatile private var simWatchStarted = false
     @Volatile private var offlineWatchStarted = false
+    @Volatile private var frpApplyFailed = false
     private val heartbeatLock = Mutex()
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
@@ -131,7 +133,16 @@ class ManagementService : Service() {
         // phones that were provisioned before this build.
         if (dpc.isDeviceOwner) dpc.applyAllRestrictions()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification())
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (e: Exception) {
+            // A phone that is not Device Owner has no location permission, which the "location" service
+            // type needs on Android 14+. Fall back to the plain data-sync type instead of crashing.
+            Log.w(TAG, "startForeground with full types failed (${e.message}) — retrying data sync only")
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, buildNotification(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            }
+        }
         try {
             ContextCompat.registerReceiver(
                 this, simReceiver,
@@ -187,6 +198,12 @@ class ManagementService : Service() {
         // Offline overdue lock: the deadline alarm is lost on reboot, so re-arm it on every start,
         // and lock right away if the deadline already passed (e.g. the phone was off over the date).
         try { offlineLockTick(); OfflineLockGuard.schedule(this) } catch (e: Exception) { Log.w(TAG, "offline lock: ${e.message}") }
+
+        // Online app update: once per service start, settle an update that was in progress (report it
+        // installed after the new version started, or failed if it never completed). Never blocks.
+        if (!pollingStarted) {
+            try { com.moneymobile.installment.update.AppUpdater.onServiceStart(this) } catch (e: Exception) { Log.w(TAG, "app update: ${e.message}") }
+        }
 
         if (intent?.action == ACTION_FCM_APPLY) {
             val lock = intent.getBooleanExtra(EXTRA_LOCK, false)
@@ -292,6 +309,9 @@ class ManagementService : Service() {
     }
 
     private suspend fun doHeartbeat() {
+        // Registration pending (e.g. the server forgot this phone and it is registering again): the
+        // old token is useless, so don't keep sending it every minute.
+        if (!AppPreferences.isEnrolled(this)) return
         val deviceId = AppPreferences.getDeviceId(this) ?: run {
             Log.w(TAG, "No device ID — skipping heartbeat")
             return
@@ -334,6 +354,10 @@ class ManagementService : Service() {
                 }
             }
             Log.i(TAG, "Location fix: ${fix?.lat}, ${fix?.lng} (±${fix?.accuracy}m) stale=$stale")
+            // Reset protection as Android holds it right now (shown to the shop as On / Off / Not supported).
+            val frpReport = try {
+                dpc.frpStatus().let { (st, ids) -> if (st == "off" && frpApplyFailed) "failed" to ids else st to ids }
+            } catch (e: Exception) { "failed" to null }
             val request = HeartbeatRequest(
                 deviceId = deviceId,
                 deviceToken = deviceToken,
@@ -349,7 +373,11 @@ class ManagementService : Service() {
                 simState = SimWatcher.stateLabel(this),
                 appVersion = com.moneymobile.installment.BuildConfig.VERSION_NAME,
                 fcmToken = AppPreferences.getFcmToken(this),
-                timestamp = System.currentTimeMillis()
+                hasCommandKey = CommandSig.hasKey(this),
+                timestamp = System.currentTimeMillis(),
+                appVersionCode = com.moneymobile.installment.BuildConfig.VERSION_CODE,
+                frpState = frpReport.first,
+                frpAccounts = frpReport.second
             )
 
             val response = ApiClient.service.sendHeartbeat(request)
@@ -357,15 +385,36 @@ class ManagementService : Service() {
             if (response.isSuccessful) {
                 val body = response.body()
                 AppPreferences.setLastHeartbeatTime(this, System.currentTimeMillis())
-                body?.agreement?.let {
+                // The server hands over the signing key once, to a phone that has none.
+                body?.commandKey?.takeIf { it.isNotBlank() }?.let { if (!CommandSig.hasKey(this)) AppPreferences.setCommandKey(this, it) }
+                // Only trust the lock state and commands when the server's signature checks out.
+                val verifiedAgreement = body?.agreement?.takeIf { CommandSig.agreementOk(this, it) }
+                // Reset protection: only a list the server signed (a forged reply can't remove it).
+                body?.frpAccountIds?.let { ids ->
+                    if (CommandSig.frpOk(this, ids, body.frpSig)) applyFactoryResetProtection(ids)
+                    else Log.w(TAG, "Ignoring reset-protection list: bad signature")
+                }
+                verifiedAgreement?.let {
                     AppPreferences.setAgreementStatusJson(this, gson.toJson(it))
                     // Keep the payment deadline + server clock on the phone for the offline lock.
-                    OfflineLockGuard.onSynced(this, it.serverTime, it.overdueLockAt)
+                    OfflineLockGuard.onSynced(this, it.serverTime, it.overdueLockAt, CommandSig.laterLockAt(this, it))
                 }
                 Log.i(TAG, "Heartbeat sent — command: ${body?.command?.type}")
 
                 val held = simAlertHeldSince
-                body?.command?.also { cmd ->
+                body?.command?.takeIf { cmd ->
+                    val ok = CommandSig.commandOk(this, cmd)
+                    if (!ok) Log.w(TAG, "Ignoring command ${cmd.type}: bad signature")
+                    // A command id we already ran is never run twice (replay guard). But the shop only
+                    // repeats a command when it never got our confirmation, so confirm Lock/Unlock again.
+                    // (Release is never repeated: after it the phone stops checking in.)
+                    val repeat = ok && cmd.id == AppPreferences.getLastCmdId(this)
+                    if (repeat && (cmd.type == CommandType.LOCK_DEVICE || cmd.type == CommandType.UNLOCK_DEVICE)) {
+                        sendAck(cmd.id, deviceId, deviceToken, true, "already applied", attempts = 2)
+                    }
+                    ok && !repeat
+                }?.also { cmd ->
+                    AppPreferences.setLastCmdId(this, cmd.id)
                     if (cmd.type == CommandType.UNLOCK_DEVICE && held != null && issuedAtMs(cmd.issuedAt) in 1..held) {
                         Log.w(TAG, "Ignoring Unlock issued before the SIM was removed (alert not delivered yet)")
                     } else if (cmd.type != CommandType.NONE) {
@@ -378,14 +427,18 @@ class ManagementService : Service() {
                 // so an offline blip or missing data never fabricates a lock/unlock.
                 // While a SIM alert is undelivered the server doesn't know about the SIM lock yet,
                 // so its "unlocked" must not be applied.
-                val backendLocked = body?.agreement?.locked
+                val backendLocked = verifiedAgreement?.locked
                 reconcileLockState(if (held != null && backendLocked == false) null else backendLocked)
+
+                // Online app update: start / continue / stop the background update this check-in asks for.
+                // Kept last and isolated, so it can never affect locking or commands.
+                try { com.moneymobile.installment.update.AppUpdater.onHeartbeat(this, body?.appUpdate) } catch (e: Exception) { Log.w(TAG, "app update: ${e.message}") }
             } else {
                 Log.e(TAG, "Heartbeat failed: ${response.code()}")
                 // 401 = the server no longer knows this phone (its record was deleted, or it was
                 // re-registered elsewhere). Register again by itself using the saved shop setup,
                 // instead of staying "Pending" forever.
-                if (response.code() == 401 && !AppPreferences.getSetupShopId(this).isNullOrBlank()) {
+                if (response.code() == 401 && AppPreferences.isEnrolled(this) && !AppPreferences.getSetupShopId(this).isNullOrBlank()) {
                     Log.w(TAG, "Phone not recognised by server — registering again")
                     AppPreferences.setEnrolled(this, false)
                     com.moneymobile.installment.provisioning.AutoEnrollWorker.enqueue(this)
@@ -450,11 +503,19 @@ class ManagementService : Service() {
                     // Fully paid: tear everything down, then stop managing this phone.
                     AppPreferences.setDeviceLocked(this, false)
                     dpc.releaseFully()
-                    AppPreferences.setReleased(this, true)
-                    result = "released"
-                    executed = true
-                    // Ack is sent below; then shut the service and background work down.
-                    releaseAfterAck = true
+                    if (dpc.isDeviceOwner) {
+                        // Android refused to let go of the phone. Do NOT pretend it was released: keep
+                        // managing it so the shop sees the failure and can send Release again.
+                        result = if (dpc.frpStatus().first == "on") "release incomplete - reset protection could not be removed, press Release again"
+                                 else "release incomplete - app is still device owner"
+                        Log.e(TAG, result)
+                    } else {
+                        AppPreferences.setReleased(this, true)
+                        result = "released"
+                        executed = true
+                        // Ack is sent below; then shut the service and background work down.
+                        releaseAfterAck = true
+                    }
                 }
                 CommandType.BLOCK_CALLS -> {
                     dpc.blockOutgoingCalls()
@@ -481,20 +542,9 @@ class ManagementService : Service() {
             Log.e(TAG, "Command execution failed: ${e.message}")
         }
 
-        // Acknowledge command to backend
-        try {
-            ApiClient.service.acknowledgeCommand(
-                CommandAckRequest(
-                    deviceId = deviceId,
-                    deviceToken = token,
-                    commandId = command.id,
-                    executed = executed,
-                    result = result
-                )
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to acknowledge command: ${e.message}")
-        }
+        // Acknowledge command to backend. Release matters most (the shop marks the phone handed over
+        // only on this confirmation), so it keeps trying for about a minute on a weak connection.
+        sendAck(command.id, deviceId, token, executed, result, attempts = if (releaseAfterAck) 6 else 3)
 
         if (releaseAfterAck) {
             Log.i(TAG, "Released — stopping management service and heartbeat")
@@ -506,6 +556,40 @@ class ManagementService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
+    }
+
+    /** Tells the shop a command was handled. Retries with growing pauses; a 4xx answer is final. */
+    private suspend fun sendAck(commandId: String, deviceId: String, token: String, executed: Boolean, result: String, attempts: Int) {
+        val pauses = longArrayOf(0L, 3_000L, 6_000L, 12_000L, 24_000L, 30_000L)
+        for (i in 0 until attempts.coerceIn(1, pauses.size)) {
+            if (pauses[i] > 0) delay(pauses[i])
+            try {
+                val r = ApiClient.service.acknowledgeCommand(CommandAckRequest(deviceId, token, commandId, executed, result))
+                if (r.isSuccessful || r.code() in 400..499) return
+                Log.w(TAG, "Ack not accepted yet (${r.code()}) — attempt ${i + 1}")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to acknowledge command (attempt ${i + 1}): ${e.message}")
+            }
+        }
+    }
+
+    /** Android 11+: after any factory reset / reflash, only the shop's Google account can set the phone up again. */
+    private fun applyFactoryResetProtection(ids: List<String>) {
+        try {
+            val key = ids.filter { it.isNotBlank() }.sorted().joinToString(",")
+            // Skip when already applied — unless Android no longer holds exactly this list (then apply again).
+            if (key == (AppPreferences.getFrpApplied(this) ?: "")) {
+                val (st, held) = dpc.frpStatus()
+                val holdsIt = if (key.isEmpty()) st != "on" else (st == "on" && held == key)
+                if (holdsIt || st == "unsupported") return
+            }
+            if (dpc.applyFactoryResetProtection(ids.filter { it.isNotBlank() })) {
+                AppPreferences.setFrpApplied(this, key.ifEmpty { null })
+                frpApplyFailed = false
+            } else {
+                frpApplyFailed = true
+            }
+        } catch (e: Exception) { Log.w(TAG, "FRP: ${e.message}") }
     }
 
     private fun issuedAtMs(iso: String?): Long {
